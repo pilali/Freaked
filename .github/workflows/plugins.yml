@@ -172,7 +172,10 @@ jobs:
           key: juce-${{ runner.os }}-${{ env.JUCE_TAG }}
 
       - name: Configure
-        run: cmake -S Plugins -B build -G "Visual Studio 17 2022" -A x64
+        # No -G on purpose: CMake picks whichever Visual Studio the runner
+        # image ships, so a new image does not break the build. -A x64 still
+        # pins the architecture.
+        run: cmake -S Plugins -B build -A x64
 
       - name: Build
         run: cmake --build build --config Release --parallel
