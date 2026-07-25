@@ -4,6 +4,13 @@ This is a set of plugins programmed in Faust, Using the Faust compiler
 (for more information see faust.grame.fr)
 
 
+Desktop builds: Audio Unit and VST3
+  The same Faust sources are now also wrapped as an Audio Unit (macOS,
+  universal, for Logic Pro) and as VST3 for macOS and Windows. See
+  Plugins/README.md for how to build and install them. The LV2 build for
+  the MOD is unchanged and still comes from CppSrc/ via this Makefile.
+
+
 Monday 25 Januari, 2016
 I came across a awesome real-time granulator programmed by Mayank Sanganeria.
 I made some minor changes and decided to add it to Freaked because it is so.

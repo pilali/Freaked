@@ -13,7 +13,11 @@ import ("math.lib") ;
 // Globals
 samplera = SR:int;
 counter = _+(1)%delayLength~_; // to iterate through the delay line
-delayBufferSize = 480000;
+// The delay line is a fixed-size table, but the requested delay is
+// (sample rate * delay length) and therefore grows with the sample rate.
+// 960000 covers the full 10 s at 96 kHz; above that the delay is clamped
+// to the table size instead of folding back onto itself.
+delayBufferSize = 960000;
 maxN = 16;
 
 
@@ -25,7 +29,7 @@ mix=hslider("mix", 0.5, 0, 1, 0.01):smooth(0.999);
 
 //Granular synth variables
 grainLength = int(samplera*gLength);
-delayLength = int(samplera*dLength);
+delayLength = int(min(samplera*dLength, delayBufferSize-1));
 
 
 

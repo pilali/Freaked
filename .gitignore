@@ -2,3 +2,9 @@
 *.o
 *.so
 export
+
+# Desktop plugin builds (CMake + JUCE)
+build/
+Plugins/build/
+*.dsp.json
+.DS_Store

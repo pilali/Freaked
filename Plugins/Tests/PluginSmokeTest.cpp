@@ -1,0 +1,365 @@
+/*
+    Loads a built VST3 through JUCE's own plugin host and exercises it the way
+    a DAW would: negotiate a bus layout, prepare, push audio through it, and
+    round-trip the state.
+
+    This is deliberately a host level test rather than a unit test. The parts
+    most likely to break -- bus negotiation, the channel mapping between the
+    host and a fixed channel count Faust DSP, and parameter plumbing -- only
+    exist at the boundary the host talks to.
+
+    Usage: FreakedSmokeTest <path to plugin> [more paths...]
+*/
+
+#include "FreakedProcessor.h"
+
+#include <juce_audio_processors/juce_audio_processors.h>
+#include <juce_audio_utils/juce_audio_utils.h>
+
+#include <iostream>
+#include <map>
+
+namespace
+{
+    int failures = 0;
+
+    void check (bool condition, const juce::String& what)
+    {
+        if (condition)
+        {
+            std::cout << "    ok   " << what << std::endl;
+        }
+        else
+        {
+            std::cout << "    FAIL " << what << std::endl;
+            ++failures;
+        }
+    }
+
+    /** Fills a buffer with a repeatable pseudo random signal. */
+    void fillWithNoise (juce::AudioBuffer<float>& buffer, juce::Random& random)
+    {
+        for (int channel = 0; channel < buffer.getNumChannels(); ++channel)
+            for (int sample = 0; sample < buffer.getNumSamples(); ++sample)
+                buffer.setSample (channel, sample, random.nextFloat() * 0.5f - 0.25f);
+    }
+
+    bool bufferIsFinite (const juce::AudioBuffer<float>& buffer)
+    {
+        for (int channel = 0; channel < buffer.getNumChannels(); ++channel)
+        {
+            const auto* data = buffer.getReadPointer (channel);
+
+            for (int sample = 0; sample < buffer.getNumSamples(); ++sample)
+                if (! std::isfinite (data[sample]))
+                    return false;
+        }
+
+        return true;
+    }
+
+    /** Runs audio through the plugin in one bus layout. */
+    void testLayout (juce::AudioPluginInstance& plugin,
+                     int inputChannels,
+                     int outputChannels,
+                     double sampleRate,
+                     const juce::String& description)
+    {
+        juce::AudioProcessor::BusesLayout layout;
+        layout.inputBuses.add  (juce::AudioChannelSet::canonicalChannelSet (inputChannels));
+        layout.outputBuses.add (juce::AudioChannelSet::canonicalChannelSet (outputChannels));
+
+        if (! plugin.checkBusesLayoutSupported (layout))
+        {
+            std::cout << "    --   " << description << " (not offered)" << std::endl;
+            return;
+        }
+
+        check (plugin.setBusesLayout (layout), description + ": layout accepted");
+
+        // A host must never exceed the maximum it announced here, so every
+        // block below stays within it.
+        constexpr int maximumBlockSize = 1024;
+        plugin.prepareToPlay (sampleRate, maximumBlockSize);
+
+        juce::Random random (0x66726b64);
+        juce::MidiBuffer midi;
+
+        const int channels = juce::jmax (inputChannels, outputChannels);
+        bool sawOutput = false;
+
+        // Several blocks, and deliberately not all the same size: hosts vary the
+        // block length, and the wrapper chunks internally.
+        for (const int blockSize : { maximumBlockSize, 512, 64, 7 })
+        {
+            juce::AudioBuffer<float> buffer (channels, blockSize);
+            buffer.clear();
+            fillWithNoise (buffer, random);
+
+            plugin.processBlock (buffer, midi);
+
+            if (! bufferIsFinite (buffer))
+            {
+                check (false, description + ": output is finite (block " + juce::String (blockSize) + ")");
+                plugin.releaseResources();
+                return;
+            }
+
+            for (int channel = 0; channel < outputChannels; ++channel)
+                if (buffer.getMagnitude (channel, 0, blockSize) > 1.0e-6f)
+                    sawOutput = true;
+        }
+
+        check (true, description + ": output stays finite across varying block sizes");
+        check (sawOutput, description + ": produces a non-silent signal");
+
+        plugin.releaseResources();
+    }
+
+    /** Checks the loaded plugin offers an editor of a sensible size.
+
+        Actually putting it on screen is done separately, against the processor
+        directly: showing a plugin-side editor inside this host would put two
+        copies of JUCE on one X11 connection, which is a property of this test
+        harness rather than of the plugin.
+    */
+    void testEditor (juce::AudioPluginInstance& plugin)
+    {
+        check (plugin.hasEditor(), "reports that it has an editor");
+
+        std::unique_ptr<juce::AudioProcessorEditor> editor (plugin.createEditorIfNeeded());
+
+        if (editor == nullptr)
+        {
+            check (false, "editor is created");
+            return;
+        }
+
+        check (true, "editor is created");
+        check (editor->getWidth() > 0 && editor->getHeight() > 0,
+               "editor has a non-empty size");
+    }
+
+    void testPlugin (juce::AudioPluginFormatManager& formatManager, const juce::File& file)
+    {
+        std::cout << "\n" << file.getFileName() << std::endl;
+
+        juce::OwnedArray<juce::PluginDescription> descriptions;
+
+        for (auto* format : formatManager.getFormats())
+            if (format->fileMightContainThisPluginType (file.getFullPathName()))
+                format->findAllTypesForFile (descriptions, file.getFullPathName());
+
+        if (descriptions.isEmpty())
+        {
+            check (false, "plugin was discovered by the host");
+            return;
+        }
+
+        check (true, "plugin was discovered by the host");
+
+        juce::String error;
+        auto plugin = formatManager.createPluginInstance (*descriptions[0], 48000.0, 512, error);
+
+        if (plugin == nullptr)
+        {
+            check (false, "plugin instantiates (" + error + ")");
+            return;
+        }
+
+        check (true, "plugin instantiates");
+
+        const auto& parameters = plugin->getParameters();
+        check (! parameters.isEmpty(), "exposes parameters to the host");
+
+        std::cout << "    ---- " << parameters.size() << " parameters: ";
+        for (auto* parameter : parameters)
+            std::cout << parameter->getName (32) << "  ";
+        std::cout << std::endl;
+
+        // Every parameter has to survive a state round trip, which is what a
+        // session recall in the DAW relies on. Bypass is excluded: it is
+        // synthesised by the VST3 wrapper and owned by the host, not by the
+        // plugin's own state.
+        auto* bypassParameter = plugin->getBypassParameter();
+
+        auto isPersisted = [bypassParameter] (const juce::AudioProcessorParameter* parameter)
+        {
+            return parameter != bypassParameter;
+        };
+
+        for (auto* parameter : parameters)
+            if (isPersisted (parameter))
+                parameter->setValueNotifyingHost (0.75f);
+
+        // Compare the real values rather than the normalised ones. A stepped
+        // parameter snaps when it is denormalised, so a saved 7.7 comes back as
+        // a slightly different normalised number that denormalises to the same
+        // 7.7. The audible state is what has to survive, not its encoding.
+        std::map<const juce::AudioProcessorParameter*, juce::String> expected;
+
+        for (auto* parameter : parameters)
+            if (isPersisted (parameter))
+                expected[parameter] = parameter->getCurrentValueAsText();
+
+        juce::MemoryBlock state;
+        plugin->getStateInformation (state);
+        check (state.getSize() > 0, "produces a non-empty state blob");
+
+        for (auto* parameter : parameters)
+            if (isPersisted (parameter))
+                parameter->setValueNotifyingHost (0.1f);
+
+        plugin->setStateInformation (state.getData(), static_cast<int> (state.getSize()));
+
+        bool restored = true;
+        for (auto* parameter : parameters)
+        {
+            if (! isPersisted (parameter))
+                continue;
+
+            const auto target = expected[parameter];
+            const auto actual = parameter->getCurrentValueAsText();
+
+            if (actual != target)
+            {
+                restored = false;
+                std::cout << "    ---- '" << parameter->getName (32)
+                          << "' came back as " << actual
+                          << " instead of " << target << std::endl;
+            }
+        }
+
+        check (restored, "state round trip restores every parameter");
+
+        testEditor (*plugin);
+
+        for (const double sampleRate : { 44100.0, 48000.0, 96000.0 })
+        {
+            testLayout (*plugin, 2, 2, sampleRate, "stereo in/out @ " + juce::String (sampleRate, 0));
+            testLayout (*plugin, 1, 1, sampleRate, "mono in/out @ " + juce::String (sampleRate, 0));
+            testLayout (*plugin, 1, 2, sampleRate, "mono to stereo @ " + juce::String (sampleRate, 0));
+        }
+    }
+}
+
+namespace
+{
+    /** Returns true when the image contains more than a single flat colour. */
+    bool imageHasContent (const juce::Image& image)
+    {
+        const auto reference = image.getPixelAt (0, 0);
+
+        for (int y = 0; y < image.getHeight(); y += 2)
+            for (int x = 0; x < image.getWidth(); x += 2)
+                if (image.getPixelAt (x, y) != reference)
+                    return true;
+
+        return false;
+    }
+
+    /** Builds the wrapper's own editor and renders it off screen.
+
+        This links the processor directly rather than going through a plugin
+        format, so the editor exercised here is the one in Plugins/Source.
+        Rendering into an image rather than onto the desktop runs the same
+        resized() and paint() code a host would trigger, but needs no display,
+        so it behaves the same on all three CI platforms.
+    */
+    void testEditorRendering()
+    {
+        std::cout << "\nEditor (" << FREAKED_PLUGIN_NAME << ", built directly)" << std::endl;
+
+        FreakedAudioProcessor processor;
+
+        std::unique_ptr<juce::AudioProcessorEditor> editor (processor.createEditor());
+        check (editor != nullptr, "editor is created");
+
+        if (editor == nullptr)
+            return;
+
+        check (editor->getWidth() > 0 && editor->getHeight() > 0,
+               "editor has a non-empty size");
+
+        auto render = [&editor] (const juce::String& what)
+        {
+            juce::Image image (juce::Image::ARGB,
+                               juce::jmax (1, editor->getWidth()),
+                               juce::jmax (1, editor->getHeight()),
+                               true);
+            {
+                juce::Graphics g (image);
+                editor->paintEntireComponent (g, true);
+            }
+
+            check (imageHasContent (image), what);
+        };
+
+        render ("editor draws something at its default size");
+
+        // Awkward sizes exercise the grid layout, including a part-filled row.
+        const auto width  = editor->getWidth();
+        const auto height = editor->getHeight();
+
+        for (const auto scale : { 1.4, 0.6, 2.0 })
+        {
+            editor->setSize (juce::roundToInt (width  * scale),
+                             juce::roundToInt (height * scale));
+            render ("editor draws at " + juce::String (scale, 1) + "x its default size");
+        }
+
+        editor->setSize (width, height);
+
+        // A parameter change has to reach the attached slider.
+        if (auto* parameter = processor.getParameterAt (0))
+        {
+            parameter->setValueNotifyingHost (0.42f);
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (50);
+            render ("editor still draws after a parameter change");
+        }
+    }
+}
+
+int main (int argc, char** argv)
+{
+    juce::ScopedJuceInitialiser_GUI juceInitialiser;
+
+    if (argc < 2)
+    {
+        std::cerr << "usage: FreakedSmokeTest <plugin> [plugin...]" << std::endl;
+        return 2;
+    }
+
+    // JUCE 8 requires the host to opt into each format explicitly.
+    juce::AudioPluginFormatManager formatManager;
+    formatManager.addFormat (new juce::VST3PluginFormat());
+
+   #if JUCE_PLUGINHOST_AU && JUCE_MAC
+    formatManager.addFormat (new juce::AudioUnitPluginFormat());
+   #endif
+
+    for (int i = 1; i < argc; ++i)
+    {
+        // Resolve relative paths so the test can be invoked from the build tree.
+        const auto file = juce::File::getCurrentWorkingDirectory()
+                              .getChildFile (juce::String (juce::CharPointer_UTF8 (argv[i])));
+
+        if (! file.exists())
+        {
+            std::cerr << "no such plugin: " << file.getFullPathName() << std::endl;
+            ++failures;
+            continue;
+        }
+
+        testPlugin (formatManager, file);
+    }
+
+    testEditorRendering();
+
+    std::cout << std::endl
+              << (failures == 0 ? "All checks passed."
+                                : juce::String (failures) + " check(s) FAILED.")
+              << std::endl;
+
+    return failures == 0 ? 0 : 1;
+}

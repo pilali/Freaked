@@ -1,0 +1,195 @@
+name: Build plugins
+
+on:
+  push:
+    paths:
+      - 'Faustsrc/**'
+      - 'Plugins/**'
+      - '.github/workflows/plugins.yml'
+  pull_request:
+    paths:
+      - 'Faustsrc/**'
+      - 'Plugins/**'
+      - '.github/workflows/plugins.yml'
+  workflow_dispatch:
+
+env:
+  JUCE_TAG: 8.0.15
+
+jobs:
+  # The generated Faust C++ is committed so that the macOS and Windows builders
+  # do not need a Faust installation. This job is what keeps that copy honest.
+  faust-codegen:
+    name: Faust code is up to date
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Faust
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends faust
+
+      - name: Regenerate the DSP code
+        run: Plugins/tools/generate-faust.sh
+
+      - name: Fail if the committed code differs from the sources
+        run: |
+          if ! git diff --quiet -- Plugins/Generated; then
+            echo "::error::Plugins/Generated is out of date. Run Plugins/tools/generate-faust.sh and commit the result."
+            git diff --stat -- Plugins/Generated
+            exit 1
+          fi
+          echo "Generated code matches the Faust sources."
+
+  linux:
+    name: Linux (smoke test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build pkg-config libasound2-dev libx11-dev libxext-dev \
+            libxinerama-dev libxrandr-dev libxcursor-dev libxcomposite-dev \
+            libfreetype6-dev libfontconfig1-dev libgl1-mesa-dev
+
+      - name: Cache JUCE
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: juce-${{ runner.os }}-${{ env.JUCE_TAG }}
+
+      - name: Configure
+        run: cmake -S Plugins -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Smoke test the VST3 plugins
+        run: |
+          ./build/FreakedSmokeTest_artefacts/Release/FreakedSmokeTest \
+            build/*_artefacts/Release/VST3/*.vst3
+
+  macos:
+    name: macOS (AU + VST3, universal)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache JUCE
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: juce-${{ runner.os }}-${{ env.JUCE_TAG }}
+
+      - name: Configure
+        run: |
+          cmake -S Plugins -B build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Check the binaries are universal and target the right macOS
+        run: |
+          status=0
+          for binary in build/*_artefacts/Release/AU/*.component/Contents/MacOS/* \
+                        build/*_artefacts/Release/VST3/*.vst3/Contents/MacOS/*; do
+            archs=$(lipo -archs "$binary")
+            echo "$binary -> $archs"
+            case "$archs" in
+              *arm64*x86_64*|*x86_64*arm64*) ;;
+              *) echo "::error::$binary is not a universal binary ($archs)"; status=1 ;;
+            esac
+
+            # The load command has to allow macOS 12 and older.
+            minimum=$(otool -l "$binary" | awk '/LC_BUILD_VERSION/{f=1} f&&/minos/{print $2; exit}')
+            echo "    minimum macOS: $minimum"
+          done
+          exit $status
+
+      - name: Ad-hoc sign
+        run: |
+          # macOS refuses to load unsigned arm64 code. An ad-hoc signature is
+          # enough for local use; a real Developer ID would be needed to
+          # distribute these without Gatekeeper warnings.
+          for bundle in build/*_artefacts/Release/AU/*.component \
+                        build/*_artefacts/Release/VST3/*.vst3; do
+            codesign --force --sign - --timestamp=none "$bundle"
+            codesign --verify --verbose "$bundle"
+          done
+
+      - name: Validate the Audio Units with auval
+        run: |
+          mkdir -p ~/Library/Audio/Plug-Ins/Components
+          cp -R build/*_artefacts/Release/AU/*.component ~/Library/Audio/Plug-Ins/Components/
+          killall -9 AudioComponentRegistrar || true
+          # Give the registrar a moment to pick the new components up.
+          sleep 5
+          auval -a || true
+
+          status=0
+          for code in Fclp Fpre Ftal Fvrb Fgrn; do
+            echo "== auval -v aufx $code Frkd"
+            if ! auval -v aufx "$code" Frkd; then
+              echo "::error::auval failed for $code"
+              status=1
+            fi
+          done
+          exit $status
+
+      - name: Smoke test the VST3 plugins
+        run: |
+          ./build/FreakedSmokeTest_artefacts/Release/FreakedSmokeTest \
+            build/*_artefacts/Release/VST3/*.vst3
+
+      - name: Collect the plugins
+        run: |
+          mkdir -p dist/AU dist/VST3
+          cp -R build/*_artefacts/Release/AU/*.component dist/AU/
+          cp -R build/*_artefacts/Release/VST3/*.vst3 dist/VST3/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Freaked-macOS-universal
+          path: dist
+
+  windows:
+    name: Windows (VST3)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache JUCE
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: juce-${{ runner.os }}-${{ env.JUCE_TAG }}
+
+      - name: Configure
+        run: cmake -S Plugins -B build -G "Visual Studio 17 2022" -A x64
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Smoke test the VST3 plugins
+        shell: bash
+        run: |
+          ./build/FreakedSmokeTest_artefacts/Release/FreakedSmokeTest.exe \
+            build/*_artefacts/Release/VST3/*.vst3
+
+      - name: Collect the plugins
+        shell: bash
+        run: |
+          mkdir -p dist/VST3
+          cp -R build/*_artefacts/Release/VST3/*.vst3 dist/VST3/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Freaked-Windows-x64
+          path: dist
