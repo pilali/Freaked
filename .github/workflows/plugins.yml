@@ -13,6 +13,11 @@ on:
       - '.github/workflows/plugins.yml'
   workflow_dispatch:
 
+# A new push supersedes whatever was still running for the same branch.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   JUCE_TAG: 8.0.15
 
@@ -76,6 +81,7 @@ jobs:
   macos:
     name: macOS (AU + VST3, universal)
     runs-on: macos-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
@@ -93,7 +99,11 @@ jobs:
             -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
 
       - name: Build
-        run: cmake --build build --config Release --parallel
+        # An explicit job count matters here. The default generator is Unix
+        # Makefiles, and "--parallel" with no value passes a bare -j to make,
+        # which spawns as many compiles as the dependency graph allows. On a
+        # three core runner building ten plugin binaries that thrashes.
+        run: cmake --build build --config Release --parallel 3
 
       - name: Check the binaries are universal and target the right macOS
         run: |

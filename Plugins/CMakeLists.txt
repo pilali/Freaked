@@ -112,13 +112,21 @@ function(freaked_add_plugin)
         PRIVATE
             juce::juce_audio_utils
         PUBLIC
-            juce::juce_recommended_config_flags
-            juce::juce_recommended_lto_flags)
+            juce::juce_recommended_config_flags)
+
+    if(FREAKED_ENABLE_LTO)
+        target_link_libraries(${ARG_TARGET} PUBLIC juce::juce_recommended_lto_flags)
+    endif()
 endfunction()
 
 # Install the built plugins into the user's plugin folders after each build.
 # Off by default so that CI never writes outside the build tree.
 option(FREAKED_COPY_AFTER_BUILD "Copy plugins to the user plugin folders after building" OFF)
+
+# Off by default: linking ten plugin binaries with LTO -- twenty slices for a
+# macOS universal build -- costs far more build time than it buys back in a DSP
+# that is already compiled at -O3.
+option(FREAKED_ENABLE_LTO "Build with link-time optimisation" OFF)
 
 freaked_add_plugin(
     TARGET       Freakclip
