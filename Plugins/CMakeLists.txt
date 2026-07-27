@@ -197,6 +197,7 @@ if(FREAKED_BUILD_TESTS)
 
     target_sources(FreakedSmokeTest PRIVATE
         Tests/PluginSmokeTest.cpp
+        Tests/LegacyGranulatorTest.cpp
         Source/FreakedProcessor.cpp
         Source/FreakedEditor.cpp
         Source/FaustFactory.cpp)

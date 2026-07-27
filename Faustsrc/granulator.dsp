@@ -45,7 +45,13 @@ S(1,F) = F;
 S(i,F) = F <: S(i-1,F),_ ;
 Divide(n,k) = par(i, n, /(k)) ;
 random2 = +(12345) : *(1103515245) ;
-random2aximum = 2^32 - 1 ;
+// The decimal points are load bearing. With integer literals the Faust
+// compiler evaluates 2^32 using 32 bit integer arithmetic, so it wraps to 0
+// and this whole expression becomes -1. Dividing the noise by -1 negates it
+// instead of normalising it, which leaves grain positions billions of samples
+// wide and the granulator reading anywhere but the delay line. The 2016 build
+// of the compiler folded this to 4294967295, which is what it has to be.
+random2aximum = 2.0^32.0 - 1.0 ;
 chain(n) = S(n,random2) ~ _;
 noiseyN(n) = chain(n) : Divide(n,random2aximum);
 

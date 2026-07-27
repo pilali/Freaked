@@ -16,8 +16,13 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_audio_utils/juce_audio_utils.h>
 
+#include <algorithm>
 #include <iostream>
 #include <map>
+#include <vector>
+
+/** Defined in LegacyGranulatorTest.cpp. */
+bool runLegacyGranulatorComparison();
 
 namespace
 {
@@ -86,6 +91,12 @@ namespace
         juce::MidiBuffer midi;
 
         const int channels = juce::jmax (inputChannels, outputChannels);
+
+        // Any channel, not every channel: these runs are milliseconds long, and
+        // Prefreak's first output is the end of a chain of early reflections
+        // that can be over a second deep, so it is legitimately still empty
+        // here. Per channel output is asserted in testMonoToStereo, which runs
+        // long enough for the delay lines to fill.
         bool sawOutput = false;
 
         // Several blocks, and deliberately not all the same size: hosts vary the
@@ -206,6 +217,166 @@ namespace
         }
     }
 
+    /** Checks the effect is actually driven by its input.
+
+        "Not silent" is too weak a test: with a wet/dry control at its default
+        the dry path alone keeps the output alive even when the wet side is
+        producing nothing at all. This drives the parameters fully wet, then
+        compares a run fed noise against a run fed silence. An effect that has
+        stopped listening to its input scores the same on both.
+    */
+    void testRespondsToInput (juce::AudioPluginInstance& plugin)
+    {
+        juce::AudioProcessor::BusesLayout layout;
+        layout.inputBuses.add  (juce::AudioChannelSet::stereo());
+        layout.outputBuses.add (juce::AudioChannelSet::stereo());
+
+        if (! plugin.checkBusesLayoutSupported (layout) || ! plugin.setBusesLayout (layout))
+        {
+            std::cout << "    --   responds to input (stereo not offered)" << std::endl;
+            return;
+        }
+
+        auto* bypassParameter = plugin.getBypassParameter();
+
+        // Fully wet, so nothing of the input reaches the output except through
+        // the effect itself.
+        for (auto* parameter : plugin.getParameters())
+            if (parameter != bypassParameter)
+                parameter->setValueNotifyingHost (1.0f);
+
+        // Deliberately a low sample rate. Delay lines are specified in seconds,
+        // and the longest here is ten, so a granulator fed less than that reads
+        // buffer it has not recorded into yet and is legitimately near silent.
+        // At 11 kHz those ten seconds cost a fifth of the samples they would at
+        // 48 kHz, so the test can outrun the delay line cheaply.
+        constexpr double sampleRate = 11025.0;
+        constexpr int blockSize = 512;
+        constexpr int blocks    = 280;      // about thirteen seconds
+        constexpr int measured  = 60;       // only the tail is scored
+
+        auto runWith = [&] (bool withInput)
+        {
+            plugin.prepareToPlay (sampleRate, blockSize);
+
+            juce::Random random (0x66726b64);
+            juce::MidiBuffer midi;
+            double energy = 0.0;
+            long counted = 0;
+
+            for (int block = 0; block < blocks; ++block)
+            {
+                juce::AudioBuffer<float> buffer (2, blockSize);
+                buffer.clear();
+
+                if (withInput)
+                    fillWithNoise (buffer, random);
+
+                plugin.processBlock (buffer, midi);
+
+                if (block >= blocks - measured)
+                {
+                    for (int channel = 0; channel < 2; ++channel)
+                    {
+                        const auto* data = buffer.getReadPointer (channel);
+
+                        for (int sample = 0; sample < blockSize; ++sample)
+                        {
+                            energy += double (data[sample]) * data[sample];
+                            ++counted;
+                        }
+                    }
+                }
+            }
+
+            plugin.releaseResources();
+            return counted > 0 ? std::sqrt (energy / double (counted)) : 0.0;
+        };
+
+        const auto withInput = runWith (true);
+        const auto withSilence = runWith (false);
+
+        std::cout << "    ---- fully wet output: " << withInput
+                  << " with input, " << withSilence << " with silence" << std::endl;
+
+        check (withInput > 1.0e-4, "fully wet output is audible when fed a signal");
+        check (withInput > withSilence + 1.0e-4, "output actually follows the input");
+    }
+
+    /** Feeds a mono source and checks both output channels come alive.
+
+        This is the configuration for putting one of these on a mono track in a
+        DAW. A Faust DSP with two inputs gets the single channel fanned out to
+        both, so the failure to watch for is an output that stays half silent.
+        It runs at a low sample rate and for long enough that the delay lines
+        have filled: Prefreak's first output sits behind up to a second and a
+        half of early reflections and says nothing before that.
+    */
+    void testMonoToStereo (juce::AudioPluginInstance& plugin)
+    {
+        juce::AudioProcessor::BusesLayout layout;
+        layout.inputBuses.add  (juce::AudioChannelSet::mono());
+        layout.outputBuses.add (juce::AudioChannelSet::stereo());
+
+        if (! plugin.checkBusesLayoutSupported (layout) || ! plugin.setBusesLayout (layout))
+        {
+            std::cout << "    --   mono to stereo (not offered)" << std::endl;
+            return;
+        }
+
+        constexpr double sampleRate = 11025.0;
+        constexpr int blockSize = 512;
+        constexpr int blocks    = 280;
+        constexpr int measured  = 60;
+
+        plugin.prepareToPlay (sampleRate, blockSize);
+
+        juce::Random random (0x6d6f6e6f);
+        juce::MidiBuffer midi;
+
+        double leftEnergy = 0.0, rightEnergy = 0.0, crossEnergy = 0.0;
+
+        for (int block = 0; block < blocks; ++block)
+        {
+            juce::AudioBuffer<float> buffer (2, blockSize);
+            buffer.clear();
+
+            // One source channel, which is what a mono track provides.
+            for (int sample = 0; sample < blockSize; ++sample)
+                buffer.setSample (0, sample, random.nextFloat() * 0.5f - 0.25f);
+
+            plugin.processBlock (buffer, midi);
+
+            if (block < blocks - measured)
+                continue;
+
+            const auto* left  = buffer.getReadPointer (0);
+            const auto* right = buffer.getReadPointer (1);
+
+            for (int sample = 0; sample < blockSize; ++sample)
+            {
+                leftEnergy  += double (left[sample])  * left[sample];
+                rightEnergy += double (right[sample]) * right[sample];
+                crossEnergy += double (left[sample])  * right[sample];
+            }
+        }
+
+        plugin.releaseResources();
+
+        const auto leftRms  = std::sqrt (leftEnergy  / (blockSize * double (measured)));
+        const auto rightRms = std::sqrt (rightEnergy / (blockSize * double (measured)));
+        const auto correlation = (leftEnergy > 0.0 && rightEnergy > 0.0)
+                                   ? crossEnergy / std::sqrt (leftEnergy * rightEnergy)
+                                   : 1.0;
+
+        std::cout << "    ---- mono in: left " << leftRms << ", right " << rightRms
+                  << ", L/R correlation " << correlation
+                  << (correlation < 0.9 ? "  (decorrelated)" : "  (centred)") << std::endl;
+
+        check (leftRms > 1.0e-4 && rightRms > 1.0e-4,
+               "mono to stereo: both output channels carry signal");
+    }
+
     void testPlugin (juce::AudioPluginFormatManager& formatManager, const juce::File& file)
     {
         std::cout << "\n" << file.getFileName() << std::endl;
@@ -299,6 +470,8 @@ namespace
         check (restored, "state round trip restores every parameter");
 
         testEditor (*plugin);
+        testRespondsToInput (*plugin);
+        testMonoToStereo (*plugin);
         testSampleRateSweep (*plugin);
 
         for (const double sampleRate : { 44100.0, 48000.0, 96000.0 })
@@ -422,6 +595,16 @@ int main (int argc, char** argv)
     }
 
     testEditorRendering();
+
+    if (! runLegacyGranulatorComparison())
+    {
+        std::cout << "    FAIL Granulator no longer matches the LV2 reference build" << std::endl;
+        ++failures;
+    }
+    else
+    {
+        std::cout << "    ok   Granulator still matches the LV2 reference build" << std::endl;
+    }
 
     std::cout << std::endl
               << (failures == 0 ? "All checks passed."

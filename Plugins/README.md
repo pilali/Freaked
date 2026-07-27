@@ -27,6 +27,31 @@ track two copies run side by side sharing one set of controls. The stereo
 effects also accept a mono input and widen it to stereo, which is what you want
 when feeding a reverb from a mono source.
 
+### Mono to stereo
+
+Every plugin here declares a mono in / stereo out configuration, so on a mono
+track in Logic the insert slot offers it directly — there is no separate mono
+version to install. The Audio Unit reports its capabilities as `[1, 2] [2, 2]`,
+which `auval` confirms; `[1, 1]` is only offered by `Freakclip`, whose DSP is
+mono end to end.
+
+The single input channel is fanned out to both DSP inputs, and the result is a
+genuine stereo image rather than two copies of the same signal, because the two
+halves of each DSP run their own state. Measured left/right correlation from a
+mono source, where 1.0 would mean a dead centre mono result:
+
+| Plugin | correlation from mono in |
+|--------|--------------------------|
+| Freakclip  | -0.37 |
+| Prefreak   | -0.06 |
+| Freaktail  |  0.23 |
+| FreakVerb  |  0.02 |
+| Granulator |  0.01 |
+
+The smoke test asserts both output channels come alive in this configuration
+and prints the correlation, so a regression that collapses the image to mono
+shows up as a number rather than as a complaint months later.
+
 ## Building
 
 CMake fetches JUCE itself, so a compiler and CMake 3.22+ are all that is needed:
@@ -97,6 +122,21 @@ the state:
 
 On macOS, CI additionally runs Apple's `auval` against each Audio Unit, which is
 the same validation Logic requires before it will load one.
+
+### The Granulator is pinned to the LV2 build
+
+Structural tests cannot tell you the plugin still *sounds* right. Regenerating
+the DSP with a Faust a decade newer than the one that produced the shipped LV2
+is enough to change what an expression means, silently — `2^32 - 1` folded to
+4294967295 in 2016 and folds to `-1` today, which quietly turned the
+granulator's position randomiser into a negation.
+
+So `Tests/LegacyGranulatorTest.cpp` runs the current build and the 2016 LV2 build
+side by side on the same input and compares their output envelopes. The
+reference is extracted mechanically from `CppSrc/` by
+`Plugins/tools/extract-lv2-reference.sh` and committed; it is not to be edited.
+Anything that changes the granulator's character by more than a factor of two
+fails the build.
 
 ## Layout
 
