@@ -28,8 +28,14 @@ dLength = hslider("delay length", 10, 0.5, 10, 0.1):smooth(0.999);
 mix=hslider("mix", 0.5, 0, 1, 0.01):smooth(0.999);
 
 //Granular synth variables
-grainLength = int(samplera*gLength);
-delayLength = int(min(samplera*dLength, delayBufferSize-1));
+// Both of these end up as modulo divisors, so neither may reach zero.
+// smooth() starts its state at 0 and ramps towards the slider, so for the
+// first samples after init the value here is the target scaled by about
+// 0.001: at the shortest grain length that rounds down to zero and the
+// modulo divides by it. The floor on grainLength is 2 rather than 1 because
+// (grainLength - 1) is itself a divisor in the windowing.
+grainLength = max(2, int(samplera*gLength));
+delayLength = max(1, int(min(samplera*dLength, delayBufferSize-1)));
 
 
 

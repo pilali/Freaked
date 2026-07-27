@@ -137,7 +137,19 @@ The MOD/LV2 build still comes from the pre-generated C++ in `CppSrc/` via the
 top-level `Makefile`, exactly as before. Nothing here changes the plugins on
 your pedalboard.
 
-One caveat: `Faustsrc/granulator.dsp` was fixed (see the note in the file) but
-`CppSrc/` was deliberately not regenerated, so the LV2 binary does not yet carry
-that fix. Regenerating it would mean re-running Faust against the LV2
-architecture and re-testing on the device, which is a separate job.
+One caveat worth acting on: `Faustsrc/granulator.dsp` has been fixed twice (see
+the notes in the file), but `CppSrc/` was deliberately not regenerated, so the
+LV2 binary carries neither fix. The second one matters on the device too:
+
+> `grain length` is smoothed, and a Faust `smooth()` starts its state at zero
+> and ramps up to the slider value. For the first samples after `init()` the
+> value is therefore roughly the target divided by a thousand, and at the
+> shortest grain length that rounds down to zero — which is then used as a
+> modulo divisor. The result is an integer division by zero, which is a crash,
+> not a glitch.
+
+On the MOD it only bites when the plugin initialises with `grain length` already
+at or near its minimum — loading a preset or pedalboard saved that way, rather
+than the default. Regenerating `CppSrc/` means re-running Faust against the LV2
+architecture and re-testing on the device, which is a separate job from this
+one, so it has been left alone rather than pushed out untested.

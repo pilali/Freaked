@@ -151,6 +151,22 @@ jobs:
               status=1
             fi
           done
+
+          # auval only ever exercises the slice matching the machine it runs
+          # on, so on an arm64 runner the x86_64 half of the universal binary
+          # would otherwise ship unvalidated. Rosetta covers it when present.
+          if arch -x86_64 /usr/bin/true 2>/dev/null; then
+            for code in Fclp Fpre Ftal Fvrb Fgrn; do
+              echo "== x86_64: auval -v aufx $code Frkd"
+              if ! arch -x86_64 auval -v aufx "$code" Frkd; then
+                echo "::error::auval failed for $code on the x86_64 slice"
+                status=1
+              fi
+            done
+          else
+            echo "::warning::Rosetta is unavailable on this runner, so only the arm64 slice was validated."
+          fi
+
           exit $status
 
       - name: Smoke test the VST3 plugins

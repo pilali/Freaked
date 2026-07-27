@@ -349,7 +349,7 @@ class GranulatorDSP : public dsp {
 		for (int i0 = 0; i0 < count; i0 = i0 + 1) {
 			iVec0[0] = 1;
 			fRec0[0] = fSlow0 + 0.999f * fRec0[1];
-			int iTemp0 = int(fConst0 * fRec0[0]);
+			int iTemp0 = std::max<int>(2, int(fConst0 * fRec0[0]));
 			float fTemp1 = float(iTemp0 + -1);
 			int iTemp2 = 1103515245 * (iRec2[1] + 12345);
 			int iTemp3 = 1103515245 * (iTemp2 + 12345);
@@ -384,7 +384,7 @@ class GranulatorDSP : public dsp {
 			int iRec16 = iTemp4;
 			int iRec17 = iTemp3;
 			fRec18[0] = fSlow1 + 0.999f * fRec18[1];
-			int iTemp18 = int(std::min<float>(fConst0 * fRec18[0], 959999.0f));
+			int iTemp18 = std::max<int>(1, int(std::min<float>(fConst0 * fRec18[0], 959999.0f)));
 			float fTemp19 = float(iTemp18);
 			int iTemp20 = int(0.5f * fTemp19 * (1.0f - float(iRec16)));
 			int iTemp21 = 1 - iVec0[1];
@@ -394,7 +394,7 @@ class GranulatorDSP : public dsp {
 			float fTemp23 = float(iTemp22) / fTemp1;
 			float fTemp24 = float(input0[i0]);
 			iRec20[0] = 1 % iTemp18 + iRec20[1];
-			int iTemp25 = std::max<int>(0, std::min<int>(iRec20[0] % iTemp18, 959999));
+			int iTemp25 = iRec20[0] % iTemp18;
 			ftbl0[iTemp25] = fTemp24;
 			int iTemp26 = int(fTemp23);
 			iRec21[0] = iRec21[1] * (1 - iTemp26) + iTemp20 * iTemp26;

@@ -140,6 +140,72 @@ namespace
                "editor has a non-empty size");
     }
 
+    /** Replays auval's render sweep: its sample rates, in its order, with every
+        parameter driven to an extreme.
+
+        auval walks the sample rate a long way outside what a DAW normally uses,
+        reinitialising between each step, and sets parameters to their limits
+        first. Both matter for DSP whose buffer sizes are derived from the
+        sample rate, and neither was covered before.
+    */
+    void testSampleRateSweep (juce::AudioPluginInstance& plugin)
+    {
+        juce::AudioProcessor::BusesLayout layout;
+        layout.inputBuses.add  (juce::AudioChannelSet::stereo());
+        layout.outputBuses.add (juce::AudioChannelSet::stereo());
+
+        if (! plugin.checkBusesLayoutSupported (layout) || ! plugin.setBusesLayout (layout))
+        {
+            std::cout << "    --   sample rate sweep (stereo not offered)" << std::endl;
+            return;
+        }
+
+        auto* bypassParameter = plugin.getBypassParameter();
+
+        struct Setting { const char* name; float value; };
+
+        juce::Random random (0x67726e6c);
+        juce::MidiBuffer midi;
+
+        for (const auto setting : { Setting { "maximum", 1.0f },
+                                    Setting { "minimum", 0.0f },
+                                    Setting { "default", 0.5f } })
+        {
+            for (auto* parameter : plugin.getParameters())
+                if (parameter != bypassParameter)
+                    parameter->setValueNotifyingHost (setting.value);
+
+            // auval's order, which ends by returning to a normal rate.
+            for (const auto rate : { 44100.0, 22050.0, 96000.0, 48000.0,
+                                     192000.0, 11025.0, 44100.0 })
+            {
+                for (const int blockSize : { 4096, 512, 137, 64 })
+                {
+                    plugin.prepareToPlay (rate, blockSize);
+
+                    juce::AudioBuffer<float> buffer (2, blockSize);
+                    buffer.clear();
+                    fillWithNoise (buffer, random);
+                    plugin.processBlock (buffer, midi);
+
+                    if (! bufferIsFinite (buffer))
+                    {
+                        check (false, "params at " + juce::String (setting.name)
+                                        + ", " + juce::String (rate, 0) + " Hz, "
+                                        + juce::String (blockSize) + " frames: output is finite");
+                        plugin.releaseResources();
+                        return;
+                    }
+
+                    plugin.releaseResources();
+                }
+            }
+
+            check (true, juce::String ("sample rate sweep with every parameter at its ")
+                             + setting.name);
+        }
+    }
+
     void testPlugin (juce::AudioPluginFormatManager& formatManager, const juce::File& file)
     {
         std::cout << "\n" << file.getFileName() << std::endl;
@@ -233,6 +299,7 @@ namespace
         check (restored, "state round trip restores every parameter");
 
         testEditor (*plugin);
+        testSampleRateSweep (*plugin);
 
         for (const double sampleRate : { 44100.0, 48000.0, 96000.0 })
         {
